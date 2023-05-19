@@ -1,17 +1,28 @@
 #include <TimeLib.h>
 #include <Wire.h>
-#include <Adafruit_Sensor.h>
-#include <DHT.h>
-#include <DHT_U.h>
+// #include <Adafruit_Sensor.h>
+// #include <DHT.h>
+// #include <DHT_U.h>
 #include <DS1307RTC.h>
+#include <Arduino.h>
+#include <ArtronShop_BH1750.h>
+#include <Adafruit_BMP280.h>
+
+#define LED_CONTROL 9  // output PWM led control
+// #define DHTPIN 2       // dht data pin
+// #define DHTTYPE DHT11  // DHT 11
+#define LATCH_PIN 4  // display RCLK pin connected
+#define CLOCK_PIN 3  // display SCLK pin connected
+#define DATA_PIN 5   // display DIO pin connected
 
 
-#define DHTPIN 2       // dht data pin
-#define DHTTYPE DHT11  // DHT 11
-#define LATCH_PIN 4    // display RCLK pin connected
-#define CLOCK_PIN 3    // display SCLK pin connected
-#define DATA_PIN 5     // display DIO pin connected
+#define LUX_TO_BRIGHTNESS_MULT 4.636
+#define I2CADDRESS_RTC1307 0
+#define I2CADDRESS_BMP280 0x76
+#define I2CADDRESS_BH1750 0x23
 
+// A4 - SDA - i2c data pin
+// A5 - SCL - i2c clock pin
 // битмапа зажигания символов на семисегментном экране
 static const uint8_t digitCodeMap[] = {
   // GFEDCBA  Segments      7-segment map:
@@ -37,8 +48,7 @@ static const uint8_t digitCodeMap[] = {
 #define UNDERSCORE_IDX 13  // "подчеркивание" индекс должен совпадать с битмапой в 'digitCodeMap'
 #define MAXNUMDIGITS 4     // максимальное число знаков
 
-int8_t numDigits = MAXNUMDIGITS;  // число знаков на экране
-
+int8_t numDigits = MAXNUMDIGITS;   // число знаков на экране
 uint8_t digitCodes[MAXNUMDIGITS];  // хранение битмап для каждой позиции для отображения на экране
 static const int16_t powersOf10[] = {
   1,      // 10^0
@@ -49,179 +59,274 @@ static const int16_t powersOf10[] = {
 };
 
 /**
-   * 0 - показываем температуру снаружи
-   * - - показываем температуру внутри
-   * 1 - показываем влажность
-   * 4 - показываем время 
-   * 2 - показываем сколько покрашено
-   * 3 - показываем сколько не покрашено
-   */
-uint8_t activeMode = 4;
-uint32_t modeTimer;         // таймер текущего режима отображения
-uint32_t modeDelay = 5000;  // 10sec
+ * 0 - показываем дату 
+ * 1 - показываем время    
+ * 2 - показываем температуру dht
+ * 3 - показываем влажность dht
+ * 4 - показываем температуру bmp
+ * 5 - показываем давление bmp
+ * 6 - показываем интенсивность света  
+ * 7 - показываем сколько покрашено
+ * 8 - показываем сколько не покрашено
+ */
+#define MAXDISPLAYMODE 8
+uint8_t activeDisplayMode = 0;
+uint32_t displayModeTimer = 0;     // таймер текущего режима отображения
+uint16_t displayModeDelay = 5000;  // 10sec
 
-uint32_t dhtReadDelay = 10000;
-uint32_t dhtTimer = 0;
-float temperature = 0.0;
-float humidity = 0.0;
-DHT_Unified dht(DHTPIN, DHTTYPE);
+// DHT_Unified dht(DHTPIN, DHTTYPE);
+// uint32_t dhtReadDelay = 10000;
+// uint32_t dhtTimer = 0;
+float dhtTemperature = 0;
+float dhtHumidity = 0;
+
+
+ArtronShop_BH1750 bh1750(0x23, &Wire); // Non Jump ADDR: 0x23, Jump ADDR: 0x5C
+uint32_t lightSensorTimer = 0;
+uint16_t lightSensorTimerDelay = 2000;
+float light = 0;
+
+
+Adafruit_BMP280 bmp;  // use I2C interface
+Adafruit_Sensor *bmp_temp = bmp.getTemperatureSensor();
+Adafruit_Sensor *bmp_pressure = bmp.getPressureSensor();
+uint32_t bmpTimer = 0;
+uint16_t bmpTimerDelay = 10000;
+float temperature = 0;
+float pressure = 0;
 
 uint16_t paintedMiniatures = 35;
 uint16_t unpaintedMiniatures = 432;
-
+bool needUpdateDigits = true;
 tmElements_t tm;
-// uint8_t hours = 14;
-// uint8_t minutes = 32;
+
+uint8_t lightMode = 0;
 
 void setup() {
   Serial.begin(9600);
+  // инициализируем пин управления светом
+  pinMode(LED_CONTROL, OUTPUT);
   // инициализируем пины экрана
   pinMode(DATA_PIN, OUTPUT);
   pinMode(CLOCK_PIN, OUTPUT);
   pinMode(LATCH_PIN, OUTPUT);
-  // инициализируем работу с датчиком
-  dht.begin();
-  sensor_t sensor;
-  dht.temperature().getSensor(&sensor);
-  dhtReadDelay = sensor.min_delay / 100;
-  tm.Hour=12;
-  tm.Minute=23;
-  tm.Second=45;
-  tm.Day=15;
-  tm.Month=5;
-  tm.Year=CalendarYrToTm(2023);
+  // инициализируем работу с датчиком dht11
+  // dht.begin();
+  // sensor_t sensor;
+  // dht.temperature().getSensor(&sensor);
+  // dhtReadDelay = sensor.min_delay / 100;
+  // инициализируем шину I2C
+  Wire.begin();
+  // запускаем датчик интенсивности освещения с адресом по-умолчанию
+  bh1750.begin();
+  // запускаем датчик BMP280 с адресом 0x76
+  bmp.begin(0x76);
+  // настраиваем датчик BMP280
+  bmp.setSampling(Adafruit_BMP280::MODE_NORMAL,     /* Operating Mode. */
+                  Adafruit_BMP280::SAMPLING_X2,     /* Temp. oversampling */
+                  Adafruit_BMP280::SAMPLING_X16,    /* Pressure oversampling */
+                  Adafruit_BMP280::FILTER_X16,      /* Filtering. */
+                  Adafruit_BMP280::STANDBY_MS_500); /* Standby time. */
+  // инициализируем RTC модуль
+  tm.Hour = 12;
+  tm.Minute = 0;
+  tm.Second = 45;
+  tm.Day = 15;
+  tm.Month = 4;
+  tm.Year = CalendarYrToTm(2023);
   RTC.write(tm);
   RTC.read(tm);
-  Serial.println((uint8_t)tm.Minute);
+  // Serial.println("setup ok");
 }
 
 void loop() {
   // читаем серийный порт для обновления данных
   readDataUpdates();
+
   // измеряем температуру и влажность не слишком часто
-  if (millis() - dhtTimer > dhtReadDelay) {
-    readDHTSensor();
-    dhtTimer = millis();
+  // if (millis() - dhtTimer > dhtReadDelay) {
+  //   readDHTSensor();
+  //   dhtTimer = millis();
+  // }
+
+  if (millis() - lightSensorTimer > lightSensorTimerDelay) {
+    readLightSensor();
+    lightSensorTimer = millis();
   }
 
-  // переключаем режимы
-  if (millis() - modeTimer > modeDelay) {
-    modeTimer = millis();
-    // activeMode++;
-    if (activeMode > 4) {
-      activeMode = 0;
+  if (millis() - bmpTimer > bmpTimerDelay) {
+    readBMP280Sensor();
+    bmpTimer = millis();
+  }
+
+  // переключаем режимы экрана
+  if (millis() - displayModeTimer > displayModeDelay) {
+    displayModeTimer = millis();
+    activeDisplayMode++;// = activeDisplayMode + (uint8_t)1;
+    needUpdateDigits = true;
+    if (activeDisplayMode > MAXDISPLAYMODE) {
+      activeDisplayMode = 0;
     }
   }
-
+  // выствляем яркость ангара
+  lightUpHangar(lightMode);
   // рисуем на экране
-  showData(activeMode);
+  showData(activeDisplayMode);
 }
 
 void readDataUpdates() {
-  uint16_t s1 = 99;
   tmElements_t outerTime;
-  RTC.read(outerTime);  
+  RTC.read(outerTime);
   while (Serial.available() > 0) {
     uint8_t c = Serial.read();
     if (c == 'H') {
-      s1 = Serial.parseInt();
-      outerTime.Hour = s1;
-      // if (s1 < 25) {
-      //   hours = s1;
-      // }
-      outerTime.Hour = s1;
+      outerTime.Hour = Serial.parseInt();
       RTC.write(outerTime);
-      Serial.print("write hours");
-      Serial.println(outerTime.Hour);
     }
     if (c == 'M') {
-      s1 = Serial.parseInt();
-      outerTime.Minute = s1;
+      outerTime.Minute = Serial.parseInt();
       RTC.write(outerTime);
-      Serial.print("write minute");
-      Serial.println(outerTime.Minute);
-      // if (s1 < 60) {
-        // minutes = s1;
-      // }
     }
     if (c == 'S') {
-      s1 = Serial.parseInt();
-      outerTime.Second = s1;
-      RTC.write(outerTime);
-      // if (s1 < 60) {
-        // minutes = s1;
-      // }
-    }
-    if (c == 'y') {
-      s1 = Serial.parseInt();
-      outerTime.Year = CalendarYrToTm(s1);
+      outerTime.Second = Serial.parseInt();
       RTC.write(outerTime);
     }
+    // if (c == 'y') {
+    //   outerTime.Year = CalendarYrToTm(Serial.parseInt());
+    //   RTC.write(outerTime);
+    // }
     if (c == 'm') {
-      s1 = Serial.parseInt();
-      outerTime.Month = s1;
+      outerTime.Month = Serial.parseInt();
       RTC.write(outerTime);
     }
     if (c == 'd') {
-      s1 = Serial.parseInt();
-      outerTime.Day = s1;
+      outerTime.Day = Serial.parseInt();
       RTC.write(outerTime);
     }
+    if (c == 'L') {
+      lightMode = Serial.parseInt();
+    }
     if (c == 'P') {
-      s1 = Serial.parseInt();
-      paintedMiniatures = s1;
+      paintedMiniatures = Serial.parseInt();
     }
     if (c == 'U') {
-      s1 = Serial.parseInt();
-      unpaintedMiniatures = s1;
+      unpaintedMiniatures = Serial.parseInt();
     }
     if (c == '\n') {
-      Serial.println("end read data");
+      // Serial.println("end read data");
       ;
     }
   }
 }
 
-void readDHTSensor() {
-  sensors_event_t event;
-  dht.temperature().getEvent(&event);
-  if (isnan(event.temperature)) {
-    temperature = 0.0;
-  } else {
-    temperature = event.temperature;
-  }
-  dht.humidity().getEvent(&event);
-  if (isnan(event.relative_humidity)) {
-    humidity = 0.0;
-  } else {
-    humidity = event.relative_humidity;
-  }
+// void readDHTSensor() {
+//   sensors_event_t event;
+//   dht.temperature().getEvent(&event);
+//   if (isnan(event.temperature)) {
+//     dhtTemperature = 0.0;
+//   } else {
+//     dhtTemperature = event.temperature;
+//   }
+//   dht.humidity().getEvent(&event);
+//   if (isnan(event.relative_humidity)) {
+//     dhtHumidity = 0.0;
+//   } else {
+//     dhtHumidity = event.relative_humidity;
+//   }
+// }
+
+void readLightSensor() {
+  light = bh1750.light();
 }
 
+void readBMP280Sensor() {
+  sensors_event_t temp_event, pressure_event;
+  bmp_temp->getEvent(&temp_event);
+  bmp_pressure->getEvent(&pressure_event);
+  temperature = temp_event.temperature;
+  pressure = pressure_event.pressure;
+}
 
 void showData(uint8_t mode) {
   tmElements_t readTime;
+  if (!needUpdateDigits) {
+    drawDigits();
+    return;
+  }
   switch (mode) {
     case 0:
-      setNumberF(temperature, 2);
+      RTC.read(readTime);
+      // setNumberF(readTime.Month + ((float)readTime.Day / 100.0), 2);
+      setNumber(readTime.Day * 100 + readTime.Month);
       break;
     case 1:
-      setNumberF(humidity, 2);
+      RTC.read(readTime);
+      setNumberF(readTime.Hour + ((float)readTime.Minute / 100.0), 2);
+      // setNumber(readTime.Hour * 100 + readTime.Minute);
       break;
     case 2:
-      setNumber(paintedMiniatures);
+      setNumberF(dhtTemperature, 2);
       break;
     case 3:
-      setNumber(unpaintedMiniatures);
+      setNumberF(dhtHumidity, 2);      
       break;
     case 4:
-      RTC.read(readTime);
-      // float time = readTime.Hour + ((float)readTime.Minute / 100.0);
-      float time = readTime.Minute + ((float)readTime.Second / 100.0);
-      setNumberF(time, 2);
+      setNumberF(temperature, 2);
+      break;
+    case 5:
+      setNumberF(pressure * 0.75006156, 1);
+      break;
+    case 6:
+      setNumberF(light, 1);
+      break;
+    case 7:
+      setNumber(paintedMiniatures);      
+      break;
+    case 8:
+      setNumber(unpaintedMiniatures);
+      break;
   }
+  needUpdateDigits = false;
   drawDigits();
 }
+
+
+void lightUpHangar(uint8_t mode) {
+  switch(mode) {
+    case 0:
+      reset();
+      break;
+    case 1:
+      analogWrite(LED_CONTROL, (uint8_t)(255 - (light * LUX_TO_BRIGHTNESS_MULT)));
+      break;
+    case 2:
+      lowGlow();
+      break;
+    case 3:
+      midGlow();
+      break;
+    case 4:
+      brightGlow();
+      break;
+  }
+}
+
+void lowGlow() {
+  analogWrite(LED_CONTROL, 10);
+}
+
+void midGlow() {
+  analogWrite(LED_CONTROL, 100);
+}
+
+void brightGlow() {
+  analogWrite(LED_CONTROL, 255);
+}
+
+void reset() {
+    analogWrite(LED_CONTROL, 0);
+}
+
 
 /**
  * Вывести целое число
@@ -274,7 +379,7 @@ void findDigits(int16_t numToShow, int8_t decPlaces, uint8_t digits[]) {
     // Find all digits for base's representation, starting with the most
     // significant digit
     for (; digitNum < numDigits; digitNum++) {
-      int32_t factor = powersOfBase[numDigits - 1 - digitNum];
+      int16_t factor = powersOfBase[numDigits - 1 - digitNum];
       digits[digitNum] = numToShow / factor;
       numToShow -= digits[digitNum] * factor;
     }
