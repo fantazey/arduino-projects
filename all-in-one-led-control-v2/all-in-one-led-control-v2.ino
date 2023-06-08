@@ -10,11 +10,6 @@
 #else
 
 #define LED_CONTROL 9  // output PWM led control
-#include <SoftwareSerial.h>
-#define TX_PIN 4
-#define RX_PIN 5
-SoftwareSerial mySerial(RX_PIN, TX_PIN);
-
 #endif
 
 //
@@ -75,7 +70,7 @@ uint32_t updateDisplayTimer;  // таймер чтения времени из D
 #define D_LUX 9
 #define D_PAINTED 10
 #define D_UNPAINTED 11
-uint8_t displayMode;
+uint8_t displayMode = D_MIN_SEC;
 bool fixedDisplay = false;
 
 // const uint16_t powers10[2] = {10, 100};
@@ -94,7 +89,7 @@ int16_t dhtTemperature;
 uint16_t lightToDisplay;
 float light;  // интенсивность света
 
-BMP280 bmp280(I2CADDRESS_BMP280);
+// BMP280 bmp280(I2CADDRESS_BMP280);
 int16_t temperature;
 uint16_t pressure;
 
@@ -112,8 +107,7 @@ uint8_t fadeAmount = 2;
 
 
 void setup() {
-  // Serial.begin(9600);
-  // mySerial.begin(9600);
+  Serial.begin(9600);
   // инициализируем пин управления светом
   pinMode(LED_CONTROL, OUTPUT);
   // инициализируем шину I2C
@@ -121,12 +115,13 @@ void setup() {
   // запускаем датчик интенсивности освещения с адресом по-умолчанию
   _BH1750begin();
   // запускаем датчик BMP280 с адресом 0x76
-  bmp280.begin();
+  // bmp280.begin();
+  Serial.println("Start");
 }
 
 void loop() {
-  if (millis() - configTimer > _10secDelay) {
-    readConfigBlock1();
+  if (millis() - configTimer > 2 * _10secDelay) {
+    // readConfigBlock1();
     readConfigBlock2();
     configTimer = millis();
   }
@@ -136,10 +131,10 @@ void loop() {
     lightSensorTimer = millis();
   }
 
-  if (millis() - bmpTimer > _10secDelay) {
-    readBMP280Sensor();
-    bmpTimer = millis();
-  }
+  // if (millis() - bmpTimer > _10secDelay) {
+  //   readBMP280Sensor();
+  //   bmpTimer = millis();
+  // }
 
   if (millis() - readTimeTimer > _5secDelay) {
     RTC.read(tm);
@@ -147,16 +142,16 @@ void loop() {
   }
 
   // переключаем режимы экрана
-  if (millis() - displayModeTimer > _10secDelay) {
-    displayModeTimer = millis();
-    if (!fixedDisplay) {
-      displayMode++;
-      needUpdateDigits = true;
-    }
-    if (displayMode > D_MAX_MODE) {
-      displayMode = D_SHIFT_START;
-    }
-  }
+  // if (millis() - displayModeTimer > _10secDelay) {
+  //   displayModeTimer = millis();
+  //   if (!fixedDisplay) {
+  //     displayMode++;
+  //     needUpdateDigits = true;
+  //   }
+  //   if (displayMode > D_MAX_MODE) {
+  //     displayMode = D_SHIFT_START;
+  //   }
+  // }
   if (millis() - updateDisplayTimer > _5secDelay) {
     needUpdateDigits = true;
     updateDisplayTimer = millis();
@@ -175,14 +170,20 @@ void readConfigBlock2() {
   Wire.write(250);
   Wire.write(2);
   Wire.endTransmission();
+  delay(1000);
   uint8_t configBuff[12] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
   uint8_t index = 0;
-  Wire.requestFrom(I2CADDRESS_DHT11, 12);
-  // delay(1000);
+  uint8_t n = Wire.requestFrom(I2CADDRESS_DHT11, 12);
+  delay(1000);
+  Serial.print(F("Request config 2: "));
+  uint8_t bbb = 0;
   while (Wire.available() > 0) {
-    configBuff[index++] = Wire.read();
+    bbb = Wire.read();
+    configBuff[index++] = bbb;
+    Serial.println(bbb);
   }
-  if (configBuff[0] != 250 || configBuff[11] != 251 || configBuff[IDX_CHANGED] == 0) {
+  Serial.println("end config block 2");
+  if (configBuff[0] != 252 || configBuff[11] != 253 || configBuff[IDX_CHANGED] == 0) {
     return;
   }
   paintedMiniatures = to16(configBuff[IDX_PAINTED_H], configBuff[IDX_PAINTED_L]);
@@ -205,14 +206,18 @@ void readConfigBlock1() {
   uint8_t index = 0;
   Wire.requestFrom(I2CADDRESS_DHT11, 12);
   // delay(1000);
+  Serial.print(F("Request config 1: "));
   while (Wire.available() > 0) {
     configBuff[index++] = Wire.read();
+    Serial.println(configBuff[index-1]);
   }
+  Serial.println("end config block 1");
   if (configBuff[0] != 250 || configBuff[11] != 251) {
     return;
   }
   if (configBuff[IDX_CHANGED] == 0) {
     dhtHumidity = configBuff[IDX_DHT_HUMIDITY];
+    dhtTemperature = configBuff[IDX_DHT_TEMPERATURE];
     temperature = configBuff[IDX_DHT_TEMPERATURE];
     return;
   }
@@ -232,10 +237,10 @@ void readConfigBlock1() {
 }
 
 void readBMP280Sensor() {
-  temperature = bmp280.getTemperature() * 100;
-  pressure = bmp280.getPressure() * 0.075006156;
-  // temperature = 2;
-  // pressure = 3;
+  // temperature = bmp280.getTemperature() * 100;
+  // pressure = bmp280.getPressure() * 0.075006156;
+  temperature = 2;
+  pressure = 3;
 }
 
 void showData() {
@@ -310,7 +315,7 @@ void lightUpHangar() {
 
 void setNumber(int16_t numToShow, uint8_t dec) {
   numberBuffer = numToShow;
-  decPlaces = 0;
+  decPlaces = dec;
 }
 
 // void setNumberF(float numToShow, uint8_t dec) {
@@ -321,13 +326,12 @@ void setNumber(int16_t numToShow, uint8_t dec) {
 
 void drawDigits() {
   Wire.beginTransmission(I2CADDRESS_DISPLAY);
-  Wire.write(0xff);
+  Wire.write(250);
   Wire.write((numberBuffer >> 8) & 0xff);
   Wire.write((uint8_t)numberBuffer & 0xff);
-  Wire.write(0xfe);
-  Wire.write(0xfd);
+  Wire.write(251);
   Wire.write(decPlaces);
-  Wire.write(0xfc);
+  Wire.write(252);
   Wire.endTransmission();
 }
 

@@ -1,12 +1,15 @@
 #include <Wire.h>
 #define DISPLAY_I2C_ADDRESS 0x29
+#if defined(__AVR_ATtiny45__) || defined(__AVR_ATtiny85__)
 #define DATA_PIN PB1   // display DIO pin connected
 #define CLOCK_PIN PB3  // display SCLK pin connected
 #define LATCH_PIN PB4  // display RCLK pin connected
+#else
+#define DATA_PIN 2   // display DIO pin connected
+#define CLOCK_PIN 4  // display SCLK pin connected
+#define LATCH_PIN 3  // display RCLK pin connected
+#endif
 
-// #define DATA_PIN 9   // display DIO pin connected
-// #define CLOCK_PIN 7  // display SCLK pin connected
-// #define LATCH_PIN 8  // display RCLK pin connected
 
 // битмапа зажигания символов на семисегментном экране
 static const uint8_t digitCodeMap[] = {
@@ -54,7 +57,6 @@ static const int16_t powersOf10[] = {
 void setup() {
   Wire.begin(DISPLAY_I2C_ADDRESS);
   Wire.onReceive(receiveEvent);
-  Serial.begin(9600);
   // инициализируем пины экрана
   pinMode(DATA_PIN, OUTPUT);
   pinMode(CLOCK_PIN, OUTPUT);
@@ -65,54 +67,39 @@ void receiveEvent(int dataSize) {
   uint8_t index = 0;
   int16_t intResult = 0;
   uint8_t decPlaces = 0;
-  uint8_t data = 0;
-  bool readData = false;
-  bool readDecPos = false;
   uint16_t pow10;
-  bool allDataReceived = false;
-  // ff - начало передачи числа
-  // каждый байт - одна цифра целого числа
-  // fe - конец передачи числа
-  // fd - начало передачи знаков после запятой - 1 байт
-  // fc - конец передачи
-  // для передачи числа 12.34 будет такая последовательность ff-4-3-2-1-fe-fd-2-fc
+  // 250 - начало передачи числа
+  // два байта числа для отображения ((n >> 8) & 0xff) и (n & 0xff)
+  // 251 - конец передачи числа
+  // один байт - знаков после запятой - 1 байт
+  // 252 - конец передачи
+  // для передачи числа 12.34 будет такая последовательность 250-4-210-251-2-252
+  uint8_t buff[6] = {0,0,0,0,0,0};
   while (Wire.available() > 0) {
-    data = Wire.read();
-    if (data == 0xfe) {
-      readData = false;
-    }
-    if (data == 0xfc) {
-      readDecPos = false;
-      allDataReceived = true;
-    }
-    if (readData) {
-      pow10 = power10(index);
-      index++;
-      intResult += data * pow10;
-    }
-    if (readDecPos) {
-      decPlaces = data;
-    }
-    if (data == 0xff) {
-      readData = true;
-    }
-    if (data == 0xfd) {
-      readDecPos = true;
-    }    
+    buff[index++] = Wire.read();
   }
-  if (allDataReceived) {
-    if (decPlaces == 0) {      
-      showInteger = true;
-      numberToShowI = intResult;
-    } else {      
-      pow10 = power10(decPlaces);
-      numberToShowF = (float)intResult / pow10;
-      decimalPos = decPlaces;
-      showInteger = false;      
-    }
+  if (buff[0] != 250 && buff[3] != 251 && buff[5] != 252) {
+    numberToShowI = -1;
+    showInteger = true;
     needDataUpdate = true;
+    return;
   }
+  intResult = (((uint16_t)buff[1] << 8) | buff[2]);
+  decPlaces = buff[4];
+  if (decPlaces == 0) {      
+    showInteger = true;
+    numberToShowI = intResult;
+  } else {      
+    pow10 = power10(decPlaces);
+    numberToShowF = (float)intResult / pow10;
+    decimalPos = decPlaces;
+    showInteger = false;      
+  }
+  needDataUpdate = true;
 }
+
+uint32_t t2;
+const uint16_t _10sec = 10000;
 
 void loop() {
   if (needDataUpdate) {

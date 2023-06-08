@@ -1,6 +1,6 @@
 #include <SoftwareSerial.h>
 
-SoftwareSerial btSerial(6, 7);
+SoftwareSerial btSerial(3, 4);
 /*
    Connect pin 2 Arduino to pin TX HC-06
    Connect pin 3 Arduino to pin RX HC-06
